@@ -426,10 +426,10 @@ class TemporalFeatures(_CycleFeaturesCalculation):
     This class calculates following temporal features for a trial.
         - double_support
         - single_support
-        - stance_duration_prec
-        - swing_duration_prec
-        - opposite_foot_off_prec
-        - opposite_foot_contact_prec
+        - stance_duration_perc
+        - swing_duration_perc
+        - opposite_foot_off_perc
+        - opposite_foot_contact_perc
         - stride_duration
         - stance_duration
         - cadence
@@ -462,15 +462,16 @@ class TemporalFeatures(_CycleFeaturesCalculation):
             rel_event_times[3],
             rel_event_times[4],
         )
-        result_dict["stance_duration_prec"] = rel_event_times[3] / rel_event_times[4]
-        result_dict["opposite_foot_off_prec"] = rel_event_times[1] / rel_event_times[4]
-        result_dict["opposite_foot_contact_prec"] = (
+        result_dict["stance_duration"] = rel_event_times[3]
+        result_dict["stance_duration_perc"] = rel_event_times[3] / rel_event_times[4]
+        result_dict["opposite_foot_off_perc"] = rel_event_times[1] / rel_event_times[4]
+        result_dict["opposite_foot_contact_perc"] = (
             rel_event_times[2] / rel_event_times[4]
         )
-        result_dict["stride_duration"] = rel_event_times[4]
-        result_dict["step_duration"] = rel_event_times[4] - rel_event_times[3]
-        result_dict["swing_duration_prec"] = (
-            (result_dict["step_duration"]) / rel_event_times[4]
+        result_dict["gait_cycle_duration"] = rel_event_times[4]
+        result_dict["swing_duration"] = rel_event_times[4] - rel_event_times[3]
+        result_dict["swing_duration_perc"] = (
+            (result_dict["swing_duration"]) / rel_event_times[4]
         )
         result_dict["cadence"] = 60 / (rel_event_times[4] / 2)
 
@@ -571,7 +572,9 @@ class SpatialFeatures(_PointDependentFeature):
             results_dict.update(
                 self._calculate_ap_margin_of_stability(
                     trial,
+                    # CHANGE
                     marker_dict["ipsi_heel"],  # type: ignore
+                    # marker_dict["ipsi_toe_2"],  # type: ignore
                     marker_dict["contra_toe_2"],  # type: ignore
                     marker_dict["xcom"]
                 )
@@ -583,6 +586,30 @@ class SpatialFeatures(_PointDependentFeature):
                     marker_dict["ipsi_ankle"],
                     marker_dict["contra_ankle"],
                     marker_dict["xcom"]
+                )
+            )
+            
+            results_dict.update(
+                self._calculate_com_inertia(
+                    trial,
+                    marker_dict["xcom"],
+                    marker_dict["com"],
+                )
+            )
+            
+            results_dict.update(
+                self.calculate_marker_time_series(
+                    trial,
+                    "com",
+                    marker_dict["com"],
+                )
+            )
+            
+            results_dict.update(
+                self.calculate_marker_time_series(
+                    trial,
+                    "xcom",
+                    marker_dict["xcom"],
                 )
             )
         except KeyError:
@@ -625,6 +652,7 @@ class SpatialFeatures(_PointDependentFeature):
             contra_ankle_marker = mapping.MappedMarkers.R_ANKLE
 
         xcom_marker = mapping.MappedMarkers.XCOM
+        com_marker = mapping.MappedMarkers.COM
 
         return {
             "ipsi_toe_2": ipsi_toe_2_marker,
@@ -635,6 +663,7 @@ class SpatialFeatures(_PointDependentFeature):
             "contra_heel": contra_heel_marker,
             "contra_ankle": contra_ankle_marker,
             "xcom": xcom_marker,
+            "com": com_marker,
         }
 
     def _calculate_step_length(
@@ -943,3 +972,74 @@ class SpatialFeatures(_PointDependentFeature):
         return {"ML_margin_of_stability": mos,
                 "ML_base_of_support": bos_proj,
                 "ML_xcom": xcom_proj}
+        
+    def _calculate_com_inertia(self,
+                            trial: model.Trial,
+                            xcom_marker: mapping.MappedMarkers,
+                            com_marker: mapping.MappedMarkers,
+                        ) -> dict[str, np.ndarray]:
+        """Calculates component of the XCoM
+        Args:
+            trial: The trial for which to calculate the AP margin of stability
+            xcom_marker: The xcom marker
+            com_marker: The com marker
+
+        Returns:
+            dict: A dictionary containing:
+                - "AP_margin_of_stability": The calculated anterio-posterior margin of stability.
+
+        """
+        event_times = self.get_event_times(trial.events)
+
+        xcom = self._get_marker_data(trial, xcom_marker).sel(
+            time=event_times[0], method="nearest"
+        )
+        com = self._get_marker_data(trial, com_marker).sel(
+            time=event_times[0], method="nearest"
+        )
+        
+        progress_axis = self._get_progression_vector(trial)
+        progress_axis = linalg.normalize_vector(progress_axis)
+        
+        sagittal_axis = self._get_sagittal_vector(trial)
+        sagittal_axis = linalg.normalize_vector(sagittal_axis)
+        if trial.events.attrs["context"] == "Left":
+            #Rotate sagittal axis so it points towards the left side of the body
+            sagittal_axis = -sagittal_axis
+        
+        com_inertia = xcom - com
+        AP_com_inertia = linalg.signed_projection_norm(com_inertia, progress_axis)
+        ML_com_inertia = linalg.signed_projection_norm(com_inertia, sagittal_axis)
+
+        return {"AP_com_inertia": AP_com_inertia, 
+                "ML_com_inertia": ML_com_inertia}
+        
+    def calculate_marker_time_series(self,
+                            trial: model.Trial,
+                            marker_name: str,
+                            marker: mapping.MappedMarkers
+                            ) -> dict[str, np.ndarray]:
+        
+        marker_data = self._get_marker_data(trial, marker)
+        
+        min_values = marker_data.min(dim="time", skipna=True)
+        max_values = marker_data.max(dim="time", skipna=True)
+        mean_values = marker_data.mean(dim="time", skipna=True)
+        median_values = marker_data.median(dim="time", skipna=True)
+        std_values = marker_data.std(dim="time", skipna=True)
+        amplitude_values = max_values - min_values
+        
+        return {
+            f"ML_{marker_name}_min": min_values.sel(axis="x").values,
+            f"AP_{marker_name}_min": min_values.sel(axis="y").values,
+            f"ML_{marker_name}_max": max_values.sel(axis="x").values,
+            f"AP_{marker_name}_max": max_values.sel(axis="y").values,
+            f"ML_{marker_name}_mean": mean_values.sel(axis="x").values,
+            f"AP_{marker_name}_mean": mean_values.sel(axis="y").values,
+            f"ML_{marker_name}_median": median_values.sel(axis="x").values,
+            f"AP_{marker_name}_median": median_values.sel(axis="y").values,
+            f"ML_{marker_name}_std": std_values.sel(axis="x").values,
+            f"AP_{marker_name}_std": std_values.sel(axis="y").values,
+            f"ML_{marker_name}_amplitude": amplitude_values.sel(axis="x").values,
+            f"AP_{marker_name}_amplitude": amplitude_values.sel(axis="y").values,
+        }

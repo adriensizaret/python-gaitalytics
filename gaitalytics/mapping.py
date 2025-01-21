@@ -25,6 +25,7 @@ class MappedMarkers(Enum):
 
     # Extrapolated center of mass marker for margin of stability
     XCOM = "xcom"
+    COM = "com"
 
 
 class MappingConfigs:
